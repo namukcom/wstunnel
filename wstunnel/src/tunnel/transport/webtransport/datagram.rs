@@ -16,6 +16,22 @@ use tracing::{debug, info, trace};
 use web_transport_quinn::{RecvStream, SendStream, Session};
 
 pub(crate) const ACK: &[u8; 4] = b"WUD1";
+
+/// An expected association lifecycle event, distinct from network/socket timeouts.
+#[derive(Debug)]
+pub(crate) struct DatagramIdleTimeout;
+
+impl std::fmt::Display for DatagramIdleTimeout {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("UDP Datagram association idle timeout")
+    }
+}
+
+impl std::error::Error for DatagramIdleTimeout {}
+
+pub(crate) fn is_datagram_idle_timeout(error: &io::Error) -> bool {
+    error.kind() == ErrorKind::TimedOut && error.get_ref().is_some_and(|cause| cause.is::<DatagramIdleTimeout>())
+}
 const HEADER_LEN: usize = 10;
 const MAX_ASSOCIATIONS: usize = 64;
 const QUEUE_PACKETS: usize = 8;
@@ -269,7 +285,7 @@ impl TransportRead for DatagramRead {
                         && self.activity.lock().unwrap().elapsed() >= timeout {
                         self.hub.counters.expired.fetch_add(1, Ordering::Relaxed);
                         info!(association = self.id, "UDP Datagram association expired");
-                        return Err(io::Error::new(ErrorKind::TimedOut, "UDP Datagram association idle timeout"));
+                        return Err(io::Error::new(ErrorKind::TimedOut, DatagramIdleTimeout));
                     }
                 }
             }
@@ -351,6 +367,41 @@ impl TransportWrite for DatagramWrite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_timeout_does_not_classify_socket_timeouts_as_expected() {
+        assert!(is_datagram_idle_timeout(&io::Error::new(
+            ErrorKind::TimedOut,
+            DatagramIdleTimeout
+        )));
+        assert!(!is_datagram_idle_timeout(&io::Error::new(
+            ErrorKind::TimedOut,
+            "socket timeout"
+        )));
+        assert!(!is_datagram_idle_timeout(&io::Error::new(ErrorKind::ConnectionReset, "reset")));
+    }
+
+    #[tokio::test]
+    async fn capsule_parser_distinguishes_clean_eof_but_flattens_transport_errors() {
+        use web_transport_quinn::proto::{CapsuleError, Http3CapsuleReader};
+        struct ResetRead;
+        impl tokio::io::AsyncRead for ResetRead {
+            fn poll_read(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Err(io::Error::new(
+                    ErrorKind::ConnectionAborted,
+                    "simulated QUIC connection closure",
+                )))
+            }
+        }
+        let mut clean = Http3CapsuleReader::new(tokio::io::empty());
+        assert!(clean.read().await.unwrap().is_none());
+        let mut reset = Http3CapsuleReader::new(ResetRead);
+        assert!(matches!(reset.read().await, Err(CapsuleError::UnexpectedEnd)));
+    }
 
     #[test]
     fn association_limit_rejects_duplicates_and_releases_capacity() {

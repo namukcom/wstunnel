@@ -60,6 +60,13 @@ drops. Session teardown logs tx/rx, oversize, invalid, queue-full, creation and
 expiration counters. Enable debug/trace verbosity using the existing CLI
 logging options when diagnosing size limits.
 
+Idle expiration is an expected lifecycle event: it produces the INFO expiration
+message and DEBUG tunnel-close diagnostics, not a receive ERROR. Socket/network
+timeouts remain errors. On session teardown the WebTransport dependency may
+log `failed to read capsule ... UnexpectedEnd`; that message can also represent
+an underlying QUIC read error whose original cause the capsule parser discards.
+It does not, by itself, indicate malformed UDP payloads.
+
 ## Validation
 
 ```text

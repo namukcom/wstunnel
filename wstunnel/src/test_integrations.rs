@@ -753,7 +753,10 @@ async fn test_udp_datagram_remote_activity_close_and_reconnect(
         read.copy(&mut buf).await.unwrap();
         assert_eq!(&buf, b"remote-activity");
     }
-    assert!(read.copy(tokio::io::sink()).await.is_err());
+    let expired = read.copy(tokio::io::sink()).await.unwrap_err();
+    assert!(crate::tunnel::transport::webtransport::datagram::is_datagram_idle_timeout(
+        &expired
+    ));
     drop(read);
     drop(write);
     let (mut read, mut write, _) = connect_datagram(uuid::Uuid::now_v7(), &client, &target).await.unwrap();

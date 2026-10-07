@@ -232,6 +232,9 @@ pub async fn propagate_remote_to_local(
 
         if let Err(err) = msg {
             match err.kind() {
+                ErrorKind::TimedOut if super::webtransport::datagram::is_datagram_idle_timeout(&err) => {
+                    debug!("UDP Datagram association closed after idle timeout");
+                }
                 ErrorKind::NotConnected => debug!("Connection closed frame received"),
                 ErrorKind::BrokenPipe => debug!("Remote side closed connection"),
                 ErrorKind::UnexpectedEof => debug!("Remote side closed connection {err}"),
