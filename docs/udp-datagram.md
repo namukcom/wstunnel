@@ -88,13 +88,16 @@ Validation recorded on 2026-10-07 with Rust 1.99.0 and the `ring` feature:
 
 | Platform | Workspace tests | Docker proxy test |
 | --- | --- | --- |
-| Linux / WSL, Docker enabled | 73 passed, 0 failed, no exclusions | Passed |
-| Windows GNU | 72 passed, 0 failed, 1 excluded | Not run on Windows |
+| Linux / WSL, Docker enabled | 76 passed, 0 failed, no exclusions | Passed |
+| Windows GNU | 75 passed, 0 failed, 1 excluded | Not run on Windows |
 
 The expected idle-timeout classification and capsule-parser diagnostics are
 included in these results. On both platforms the `ring` configuration also passes
 workspace/all-targets Clippy with `-D warnings` after warning cleanup.
-Rust 1.95.0, the default `aws-lc-rs` provider and the
+Linux also passes all 76 tests with the default `aws-lc-rs` provider, including
+PEM-loading, mTLS and certificate/key file-reload coverage after replacing the
+unmaintained rustls-pemfile wrapper with the existing PemObject API.
+Rust 1.95.0, Windows default `aws-lc-rs` and the
 complete upstream nextest/all-features CI matrix remain unvalidated. These test
 results do not establish an RDP or WAN performance improvement.
 

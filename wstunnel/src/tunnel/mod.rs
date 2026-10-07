@@ -3,6 +3,8 @@ pub mod client;
 pub mod downstream_listeners;
 pub mod server;
 mod tls_reloader;
+#[cfg(test)]
+pub(crate) use tls_reloader::TlsReloader as TestTlsReloader;
 pub mod transport;
 pub mod upstream_connectors;
 
