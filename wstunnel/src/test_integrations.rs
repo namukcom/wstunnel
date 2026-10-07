@@ -779,6 +779,166 @@ async fn test_udp_datagram_remote_activity_close_and_reconnect(
 }
 
 #[rstest]
+#[timeout(Duration::from_secs(20))]
+#[tokio::test]
+#[serial]
+async fn test_udp_datagram_buffer_reuse_and_error_cleanup(
+    server_webtransport: Server,
+    no_restrictions: RestrictionsRules,
+    dns_resolver: DnsResolver,
+) {
+    use crate::tunnel::transport::io::{TransportRead, TransportWrite};
+    use crate::tunnel::transport::webtransport::connect_datagram;
+    let endpoint = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+    let endpoint_port = endpoint.local_addr().unwrap().port();
+    let echo = tokio::spawn(async move {
+        let mut buf = [0; 65536];
+        loop {
+            let (len, peer) = endpoint.recv_from(&mut buf).await.unwrap();
+            endpoint.send_to(&buf[..len], peer).await.unwrap();
+        }
+    });
+    defer! { echo.abort(); };
+    let port = server_webtransport.config.bind.port();
+    let server_h = tokio::spawn(server_webtransport.serve(no_restrictions));
+    defer! { server_h.abort(); };
+    let client = client_webtransport(port, dns_resolver).await;
+    let target = RemoteAddr {
+        protocol: LocalProtocol::Udp {
+            timeout: None,
+            transport: crate::tunnel::UdpTransport::Datagram,
+        },
+        host: Host::Ipv4(Ipv4Addr::LOCALHOST),
+        port: endpoint_port,
+    };
+    let (mut read, mut write, _) = connect_datagram(uuid::Uuid::now_v7(), &client, &target).await.unwrap();
+    let session = {
+        let pooled = client.cnx_pool.get().await.unwrap();
+        pooled.as_ref().unwrap().as_ref().right().unwrap().clone()
+    };
+    let address = write.buf_mut().as_ptr() as usize;
+    let capacity = write.buf_mut().capacity();
+    for iteration in 0..8u8 {
+        let maximum = session.max_datagram_size() - 10;
+        for size in [0, 64, 960, 1180.min(maximum), maximum] {
+            let packet = vec![iteration; size];
+            write.buf_mut().extend_from_slice(&packet);
+            write.write().await.unwrap();
+            assert!(write.buf_mut().is_empty());
+            assert_eq!(write.buf_mut().as_ptr() as usize, address);
+            assert_eq!(write.buf_mut().capacity(), capacity);
+            let mut received = Vec::new();
+            read.copy(&mut received).await.unwrap();
+            assert_eq!(received, packet);
+        }
+    }
+    write.buf_mut().extend_from_slice(&vec![0x55; 60000]);
+    write.write().await.unwrap();
+    assert!(write.buf_mut().is_empty());
+    assert_eq!(write.buf_mut().as_ptr() as usize, address);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), read.copy(tokio::io::sink()))
+            .await
+            .is_err()
+    );
+    write.buf_mut().extend_from_slice(b"after-drop");
+    write.write().await.unwrap();
+    let mut received = Vec::new();
+    read.copy(&mut received).await.unwrap();
+    assert_eq!(&received, b"after-drop");
+    // Force the QUIC connection closed to exercise the send-error cleanup path.
+    std::ops::Deref::deref(&session).close(0u32.into(), b"test send error");
+    write.buf_mut().extend_from_slice(b"failed-send");
+    assert!(write.write().await.is_err());
+    assert!(write.buf_mut().is_empty());
+    assert_eq!(write.buf_mut().as_ptr() as usize, address);
+}
+
+#[rstest]
+#[case::fin("fin")]
+#[case::reset("reset")]
+#[case::unexpected_byte("byte")]
+#[timeout(Duration::from_secs(15))]
+#[tokio::test]
+#[serial]
+async fn test_udp_datagram_control_error_classification(
+    server_webtransport: Server,
+    dns_resolver: DnsResolver,
+    #[case] action: &'static str,
+) {
+    use crate::tunnel::transport::io::TransportRead;
+    use web_transport_quinn::quinn;
+    let tls = crate::protocols::tls::quic_server_config(server_webtransport.config.tls.as_ref().unwrap()).unwrap();
+    let crypto = quinn::crypto::rustls::QuicServerConfig::try_from(tls).unwrap();
+    let mut config = quinn::ServerConfig::with_crypto(Arc::new(crypto));
+    config.transport_config(Arc::new(
+        crate::tunnel::transport::webtransport::mk_transport_config(None).unwrap(),
+    ));
+    let endpoint = quinn::Endpoint::server(config, server_webtransport.config.bind).unwrap();
+    let mut server = web_transport_quinn::Server::new(endpoint);
+    let port = server_webtransport.config.bind.port();
+    let (trigger, ready) = tokio::sync::oneshot::channel();
+    let server_h = tokio::spawn(async move {
+        let session = server.accept().await.unwrap().ok().await.unwrap();
+        let (mut send, mut recv) = session.accept_bi().await.unwrap();
+        crate::tunnel::transport::webtransport::read_jwt_preamble(&mut recv)
+            .await
+            .unwrap();
+        send.write_all(b"WUD1").await.unwrap();
+        ready.await.unwrap();
+        match action {
+            "fin" => {
+                send.finish().unwrap();
+            }
+            "reset" => {
+                send.reset(499).unwrap();
+            }
+            "byte" => {
+                send.write_all(&[0x7f]).await.unwrap();
+            }
+            _ => unreachable!(),
+        }
+        let _streams = (send, recv);
+        session.closed().await;
+    });
+    defer! { server_h.abort(); };
+    let client = client_webtransport(port, dns_resolver).await;
+    let target = RemoteAddr {
+        protocol: LocalProtocol::Udp {
+            timeout: None,
+            transport: crate::tunnel::UdpTransport::Datagram,
+        },
+        host: Host::Ipv4(Ipv4Addr::LOCALHOST),
+        port: 1234,
+    };
+    let (mut read, _write, _) =
+        crate::tunnel::transport::webtransport::connect_datagram(uuid::Uuid::now_v7(), &client, &target)
+            .await
+            .unwrap();
+    trigger.send(()).unwrap();
+    let err = read.copy(tokio::io::sink()).await.unwrap_err();
+    match action {
+        "fin" => assert_eq!(err.kind(), std::io::ErrorKind::BrokenPipe),
+        "byte" => assert_eq!(err.kind(), std::io::ErrorKind::InvalidData),
+        "reset" => {
+            assert_ne!(err.kind(), std::io::ErrorKind::BrokenPipe);
+            // Tokio AsyncRead delegates to raw Quinn, so the source carries the
+            // HTTP/3-mapped reset code rather than the WebTransport code 499.
+            match err
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<quinn::ReadError>())
+            {
+                Some(quinn::ReadError::Reset(code)) => {
+                    assert_eq!(web_transport_quinn::proto::error_from_http3(code.into_inner()), Some(499))
+                }
+                _ => panic!("reset source lost: {err}"),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[rstest]
 #[case::unsupported_quic(false, false)]
 #[case::wrong_protocol_version(true, true)]
 #[case::legacy_server_without_ack(true, false)]

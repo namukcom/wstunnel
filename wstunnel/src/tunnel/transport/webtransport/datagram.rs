@@ -225,6 +225,19 @@ fn encode_packet(id: u64, payload: &[u8]) -> Bytes {
     packet.freeze()
 }
 
+fn control_read_error(result: io::Result<u8>) -> io::Error {
+    match result {
+        Ok(byte) => io::Error::new(
+            ErrorKind::InvalidData,
+            format!("unexpected UDP Datagram control byte: {byte:#04x}"),
+        ),
+        Err(err) if err.kind() == ErrorKind::UnexpectedEof => {
+            io::Error::new(ErrorKind::BrokenPipe, "Datagram control stream finished")
+        }
+        Err(err) => err,
+    }
+}
+
 pub struct DatagramRead {
     id: u64,
     hub: Arc<DatagramHub>,
@@ -279,7 +292,7 @@ impl TransportRead for DatagramRead {
                     }
                     return Ok(());
                 }
-                _ = self.control.read_u8() => return Err(io::Error::new(ErrorKind::BrokenPipe, "Datagram control stream closed or sent unexpected data")),
+                result = self.control.read_u8() => return Err(control_read_error(result)),
                 _ = idle => {
                     if let Some(timeout) = self.timeout
                         && self.activity.lock().unwrap().elapsed() >= timeout {
@@ -309,6 +322,38 @@ impl DatagramWrite {
             .await
             .map_err(|err| io::Error::new(ErrorKind::ConnectionAborted, err))
     }
+
+    fn send_buffered(&mut self) -> io::Result<()> {
+        let payload_len = self.buf.len();
+        *self.activity.lock().unwrap() = Instant::now();
+        self.session.deref_max_datagram_size()?;
+        if payload_len + HEADER_LEN > self.session.max_datagram_size() {
+            self.hub.counters.oversize.fetch_add(1, Ordering::Relaxed);
+            debug!(
+                association = self.id,
+                bytes = payload_len,
+                max = self.session.max_datagram_size().saturating_sub(HEADER_LEN),
+                "dropping oversized UDP Datagram"
+            );
+            return Ok(());
+        }
+        // Framing copies into independent storage owned by QUIC; the input arena
+        // can therefore be reused without changing any previously queued packet.
+        match self.session.send_datagram(encode_packet(self.id, &self.buf)) {
+            Ok(()) => {}
+            Err(web_transport_quinn::SessionError::SendDatagramError(
+                web_transport_quinn::quinn::SendDatagramError::TooLarge,
+            )) => {
+                self.hub.counters.oversize.fetch_add(1, Ordering::Relaxed);
+                debug!(association = self.id, "dropping UDP Datagram after path MTU change");
+                return Ok(());
+            }
+            Err(err) => return Err(io::Error::new(ErrorKind::ConnectionAborted, err)),
+        }
+        self.hub.counters.tx.fetch_add(1, Ordering::Relaxed);
+        trace!(association = self.id, bytes = payload_len, "UDP Datagram tx");
+        Ok(())
+    }
 }
 
 impl TransportWrite for DatagramWrite {
@@ -319,35 +364,10 @@ impl TransportWrite for DatagramWrite {
         &mut self.buf
     }
     async fn write(&mut self) -> io::Result<()> {
-        let payload = self.buf.split().freeze();
-        self.buf.reserve(MAX_PACKET_LENGTH * 2);
-        *self.activity.lock().unwrap() = Instant::now();
-        self.session.deref_max_datagram_size()?;
-        if payload.len() + HEADER_LEN > self.session.max_datagram_size() {
-            self.hub.counters.oversize.fetch_add(1, Ordering::Relaxed);
-            debug!(
-                association = self.id,
-                bytes = payload.len(),
-                max = self.session.max_datagram_size().saturating_sub(HEADER_LEN),
-                "dropping oversized UDP Datagram"
-            );
-            return Ok(());
-        }
-        match self.session.send_datagram(encode_packet(self.id, &payload)) {
-            Ok(()) => {}
-            Err(web_transport_quinn::SessionError::SendDatagramError(
-                web_transport_quinn::quinn::SendDatagramError::TooLarge,
-            )) => {
-                // The path MTU can shrink between the size check and enqueue.
-                self.hub.counters.oversize.fetch_add(1, Ordering::Relaxed);
-                debug!(association = self.id, "dropping UDP Datagram after path MTU change");
-                return Ok(());
-            }
-            Err(err) => return Err(io::Error::new(ErrorKind::ConnectionAborted, err)),
-        }
-        self.hub.counters.tx.fetch_add(1, Ordering::Relaxed);
-        trace!(association = self.id, bytes = payload.len(), "UDP Datagram tx");
-        Ok(())
+        let result = self.send_buffered();
+        // Also clear on drop/error so the next packet cannot inherit stale bytes.
+        self.buf.clear();
+        result
     }
     async fn ping(&mut self) -> io::Result<()> {
         Ok(())
@@ -367,6 +387,22 @@ impl TransportWrite for DatagramWrite {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_errors_distinguish_normal_fin_from_faults() {
+        assert_eq!(
+            control_read_error(Err(io::Error::from(ErrorKind::UnexpectedEof))).kind(),
+            ErrorKind::BrokenPipe
+        );
+        assert_eq!(control_read_error(Ok(0x7f)).kind(), ErrorKind::InvalidData);
+        let reset = control_read_error(Err(io::Error::new(ErrorKind::ConnectionReset, "original reset reason")));
+        assert_eq!(reset.kind(), ErrorKind::ConnectionReset);
+        assert_eq!(reset.to_string(), "original reset reason");
+        assert_eq!(
+            control_read_error(Err(io::Error::from(ErrorKind::TimedOut))).kind(),
+            ErrorKind::TimedOut
+        );
+    }
 
     #[test]
     fn idle_timeout_does_not_classify_socket_timeouts_as_expected() {

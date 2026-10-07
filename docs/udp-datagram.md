@@ -67,6 +67,11 @@ log `failed to read capsule ... UnexpectedEnd`; that message can also represent
 an underlying QUIC read error whose original cause the capsule parser discards.
 It does not, by itself, indicate malformed UDP payloads.
 
+The send input buffer is reused after framing into independently owned packet
+storage, including on oversize drops and send errors. Control-stream FIN remains
+an expected closure; unexpected control bytes are protocol errors and other read
+errors retain their original cause. These changes preserve the wire format.
+
 ## Validation
 
 ```text
@@ -83,8 +88,8 @@ Validation recorded on 2026-10-07 with Rust 1.99.0 and the `ring` feature:
 
 | Platform | Workspace tests | Docker proxy test |
 | --- | --- | --- |
-| Linux / WSL, Docker enabled | 68 passed, 0 failed, no exclusions | Passed |
-| Windows GNU | 67 passed, 0 failed, 1 excluded | Not run on Windows |
+| Linux / WSL, Docker enabled | 73 passed, 0 failed, no exclusions | Passed |
+| Windows GNU | 72 passed, 0 failed, 1 excluded | Not run on Windows |
 
 The expected idle-timeout classification and capsule-parser diagnostics are
 included in these results. On both platforms the `ring` configuration also passes
