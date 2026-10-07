@@ -87,7 +87,9 @@ Validation recorded on 2026-10-07 with Rust 1.99.0 and the `ring` feature:
 | Windows GNU | 67 passed, 0 failed, 1 excluded | Not run on Windows |
 
 The expected idle-timeout classification and capsule-parser diagnostics are
-included in these results. Rust 1.95.0, the default `aws-lc-rs` provider and the
+included in these results. On both platforms the `ring` configuration also passes
+workspace/all-targets Clippy with `-D warnings` after warning cleanup.
+Rust 1.95.0, the default `aws-lc-rs` provider and the
 complete upstream nextest/all-features CI matrix remain unvalidated. These test
 results do not establish an RDP or WAN performance improvement.
 
