@@ -79,6 +79,18 @@ CLI compatibility, TCP and legacy UDP, Datagram round trips, multiple local
 sources, empty packets, oversized packet recovery, bidirectional activity,
 idle recreation, control closure and reconnect.
 
+Validation recorded on 2026-10-07 with Rust 1.99.0 and the `ring` feature:
+
+| Platform | Workspace tests | Docker proxy test |
+| --- | --- | --- |
+| Linux / WSL, Docker enabled | 68 passed, 0 failed, no exclusions | Passed |
+| Windows GNU | 67 passed, 0 failed, 1 excluded | Not run on Windows |
+
+The expected idle-timeout classification and capsule-parser diagnostics are
+included in these results. Rust 1.95.0, the default `aws-lc-rs` provider and the
+complete upstream nextest/all-features CI matrix remain unvalidated. These test
+results do not establish an RDP or WAN performance improvement.
+
 Actual RDP behavior and netem/WireGuard comparisons require an authorized RDP
 server and a controllable network. Verify the mstsc UDP source PID, Datagram
 trace logs and RDP multitransport events. Compare latency, jitter, loss and CPU
