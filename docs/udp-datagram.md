@@ -14,6 +14,17 @@ TLS listener with `--enable-webtransport` enables WebTransport. Existing TLS,
 authentication and destination restrictions still apply. RDP is an example;
 no port or application receives special treatment.
 
+`?transport=datagram` is a **client-side tunnel option**. Add it only to the
+client's `-L udp://...` URI, not to the server command or server URL. The client
+negotiates the mode during tunnel setup. The server requires the updated binary
+and WebTransport enabled, but no additional Datagram-mode flag:
+
+```sh
+wstunnel server wts://0.0.0.0:9898/
+```
+
+Keep the existing TLS, authentication and restriction options for your deployment.
+
 `transport=stream` is the default. Datagram mode requires `wts://` and supports
 forward `udp://` tunnels. Reverse UDP, SOCKS UDP and transparent UDP retain their
 existing stream behavior. Unknown UDP transport names fail parsing. An older
