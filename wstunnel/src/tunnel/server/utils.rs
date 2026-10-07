@@ -586,7 +586,10 @@ mod tests {
 
         // wrong protocol - local
         let remote = RemoteAddr {
-            protocol: LocalProtocol::Udp { timeout: None },
+            protocol: LocalProtocol::Udp {
+                timeout: None,
+                transport: Default::default(),
+            },
             host: Host::Ipv4([127, 0, 0, 1].into()),
             port: 80,
         };
