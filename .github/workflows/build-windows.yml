@@ -1,0 +1,60 @@
+name: Build Windows GNU
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build wstunnel Windows x64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout upstream release
+        uses: actions/checkout@v4
+        with:
+          repository: erebe/wstunnel
+          ref: v11.1.0
+          persist-credentials: false
+
+      - name: Install MinGW
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y gcc-mingw-w64-x86-64
+
+      - name: Install Rust target
+        run: |
+          rustup toolchain install 1.100.0 \
+            --profile minimal \
+            --target x86_64-pc-windows-gnu
+
+      - name: Build
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+        run: |
+          cargo +1.100.0 build \
+            --release \
+            --locked \
+            --package wstunnel-cli \
+            --target x86_64-pc-windows-gnu
+
+      - name: Prepare artifacts
+        run: |
+          mkdir -p dist
+
+          cp target/x86_64-pc-windows-gnu/release/wstunnel.exe dist/
+
+          cd dist
+          sha256sum wstunnel.exe > SHA256SUMS.txt
+          sha256sum -c SHA256SUMS.txt
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wstunnel-v11.1.0-windows-gnu
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
