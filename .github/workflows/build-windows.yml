@@ -1,3 +1,4 @@
+
 name: Build Windows GNU
 
 on:
@@ -6,6 +7,10 @@ on:
 permissions:
   contents: write
 
+concurrency:
+  group: wstunnel-windows-release
+  cancel-in-progress: false
+
 jobs:
   build:
     name: Build wstunnel Windows x64
@@ -13,12 +18,35 @@ jobs:
     timeout-minutes: 45
 
     steps:
+      - name: Get latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG=$(gh api repos/erebe/wstunnel/releases/latest \
+            --jq '.tag_name')
+
+          test -n "$TAG"
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Upstream release: $TAG"
+
       - name: Checkout upstream release
         uses: actions/checkout@v4
         with:
           repository: erebe/wstunnel
-          ref: v11.1.0
+          ref: ${{ steps.upstream.outputs.tag }}
           persist-credentials: false
+
+      - name: Get package version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "wstunnel-cli") | .version')
+
+          test -n "$VERSION"
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "Package version: $VERSION"
 
       - name: Install MinGW
         run: |
@@ -50,29 +78,38 @@ jobs:
           sha256sum wstunnel.exe > SHA256SUMS.txt
           sha256sum -c SHA256SUMS.txt
 
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: wstunnel-v${{ env.VERSION }}-windows-gnu
+          path: dist/
+          if-no-files-found: error
+          retention-days: 90
+
       - name: Publish Release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
         run: |
-          TAG="custom-v11.1.0"
+          TAG="custom-v${VERSION}"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            echo "::error::Release $TAG already exists"
-            exit 1
+            echo "Release $TAG already exists. Skipping."
+            exit 0
           fi
 
           gh release create "$TAG" \
             dist/wstunnel.exe \
             dist/SHA256SUMS.txt \
             --target "$GITHUB_SHA" \
-            --title "wstunnel v11.1.0 (Windows GNU)" \
-            --notes "Self-compiled from upstream v11.1.0 using Rust 1.100.0, Ubuntu 24.04 and x86_64-pc-windows-gnu."
+            --title "wstunnel v${VERSION} (Windows GNU)" \
+            --notes "Self-compiled from upstream ${UPSTREAM_TAG}.
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: wstunnel-v11.1.0-windows-gnu
-          path: dist/
-          if-no-files-found: error
-          retention-days: 90
+          Build environment:
+          - Runner: Ubuntu 24.04
+          - Rust: 1.100.0
+          - Target: x86_64-pc-windows-gnu
+          - Profile: release
+
+          SHA256 checksum is included in SHA256SUMS.txt."
